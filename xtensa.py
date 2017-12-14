@@ -1,5 +1,7 @@
 #
 # IDAPython Xtensa processor module
+#
+# Based off:
 # https://github.com/themadinventor/ida-xtensa
 #
 # Copyright (C) 2014 Fredrik Ahlberg
@@ -16,19 +18,6 @@
 # this program; if not, write to the Free Software Foundation, Inc., 51 Franklin
 # Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-#  v0.1 - changes by tinhead
-#  bug fix for 'l8ui','l16si','l16ui','l32i','s8i','s16i' and 's32i' size and shift
-#  bug fix for 'rsr.epc2','rsr.epc3' detection
-#  'ill' added, normally one can work without
-#  'rsr.epc4','rsr.epc5','rsr.epc6','rsr.epc7' added
-#
-#  v0.2 - changes by tinhead
-#  bug fix for 'addmi' size
-#  bug fix for 'movi' size
-#  bug fix for 'l32r' with offset >= 0
-#  note: movi.n and addi with values higher than 127 looks bit wired in compare to
-#        xt-objdump, better would be something like 'ret.value = 0x80 - ret.value'
-
 import copy
 
 try:
@@ -42,6 +31,14 @@ except ImportError:
     CF_CALL = CF_JUMP = CF_STOP = 0
     o_void = o_reg = o_imm = o_displ = o_near = None
 
+def ida_signed(x):
+    """
+    HACK around IDA's signedness problems
+    """
+    if (x & 0x80000000):
+        return -(((~x) & 0x7FFFFFFF) + 1)
+    return x
+    
 class Operand:
     REG     = 0
     IMM     = 1
@@ -65,14 +62,14 @@ class Operand:
         self.regbase = regbase
 
 
-    def bitfield(self, op, size, rshift):
-        val = (op >> rshift) & (0xffffffff >> (32 - size))
+    def bitfield(self, opcode, size, rshift):
+        val = (opcode >> rshift) & (0xffffffff >> (32 - size))
         return val
 
-    def parse(self, ret, op, cmd = None):
-        val = self.bitfield(op, self.size, self.rshift)
+    def parse(self, op, opcode, cmd = None):
+        val = self.bitfield(opcode, self.size, self.rshift)
         if self.size2:
-            val |= ((op >> self.rshift2) & (0xffffffff >> (32-self.size2))) << self.size
+            val |= ((opcode >> self.rshift2) & (0xffffffff >> (32-self.size2))) << self.size
 
         if self.signext and (val & (1 << (self.size+self.size2-1))):
             val = -((~val)&((1 << (self.size+self.size2-1))-1))-1
@@ -83,26 +80,26 @@ class Operand:
         if self.xlate:
             val = self.xlate(val)
 
-        ret.dtyp = self.dt
+        op.dtyp = self.dt
         if self.type == Operand.REG:
-            ret.type = o_reg
-            ret.reg = val if val < 16 else 16
+            op.type = o_reg
+            op.reg = val if val < 16 else 16
         elif self.type == Operand.IMM:
-            ret.type = o_imm
-            ret.value = val
+            op.type = o_imm
+            op.value = val
         elif self.type == Operand.MEM:
-            ret.type = o_mem
-            ret.addr = (cmd.ea+3+(val<<2))&0xfffffffc if val < 0 else (((cmd.ea+3+(val<<2))-0x40000)&0xfffffffc)
+            op.type = o_mem
+            op.addr = (cmd.ea+3+(val<<2))&0xfffffffc if val < 0 else (((cmd.ea+3+(val<<2))-0x40000)&0xfffffffc)
         elif self.type == Operand.MEM_INDEX:
-            ret.type = o_displ
-            ret.phrase = self.bitfield(op, *self.regbase)
-            ret.addr = val
+            op.type = o_displ
+            op.reg = self.bitfield(opcode, *self.regbase)
+            op.addr = val
         elif self.type in (Operand.RELA, Operand.RELAL):
-            ret.type = o_near
-            ret.addr = val + cmd.ea + 4 if self.type == Operand.RELA else ((cmd.ea&0xfffffffc)+4+(val<<2))
+            op.type = o_near
+            op.addr = val + cmd.ea + 4 if self.type == Operand.RELA else ((cmd.ea&0xfffffffc)+4+(val<<2))
         elif self.type == Operand.RELU:
-            ret.type = o_near
-            ret.addr = val + cmd.ea + 4
+            op.type = o_near
+            op.addr = val + cmd.ea + 4
         else:
             raise ValueError("unhandled operand type");
 
@@ -127,80 +124,68 @@ def shimm(val):
 
 class Instr(object):
 
-    fmt_NONE        = (3, ())
-    fmt_NNONE       = (2, ())
-    fmt_RRR         = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.REG, 4, 4)))
-    fmt_RRR_extui   = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 4, 8, 1, 16), Operand(Operand.IMM, 4, 20, off=1)))
-    fmt_RRR_sext    = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, off=7)))
-    fmt_RRR_1imm    = (3, (Operand(Operand.IMM, 4, 8),))
-    fmt_RRR_2imm    = (3, (Operand(Operand.IMM, 4, 8), Operand(Operand.IMM, 4, 4)))
-    fmt_RRR_immr    = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 4, 8)))
-    fmt_RRR_2r      = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.REG, 4, 8)))
-    fmt_RRR_2rr     = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 4)))
-    fmt_RRR_sll     = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8)))
-    fmt_RRR_slli    = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, 1, 20, xlate=shimm)))
-    fmt_RRR_srai    = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 4, 8, 1, 20)))
-    fmt_RRR_sh      = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 4, 8)))
-    fmt_RRR_ssa     = (3, (Operand(Operand.REG, 4, 8),))
-    fmt_RRR_ssai    = (3, (Operand(Operand.IMM, 4, 8, 1, 4),))
-    fmt_RRI8        = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 8, 16, signext = True)))
-    fmt_RRI8_addmi  = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 8, 16, signext = True, vshift=8, dt=dt_dword)))
-    fmt_RRI8_i12    = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 8, 16, 4, 8, dt=dt_word)))
-    fmt_RRI8_disp   = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.MEM_INDEX, 8, 16, vshift=0, regbase=(4, 8))))
-    fmt_RRI8_disp16 = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.MEM_INDEX, 8, 16, vshift=1, dt=dt_word, regbase=(4, 8))))
-    fmt_RRI8_disp32 = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.MEM_INDEX, 8, 16, vshift=2, dt=dt_dword, regbase=(4, 8))))
-    fmt_RRI8_b      = (3, (Operand(Operand.REG, 4, 8), Operand(Operand.REG, 4, 4), Operand(Operand.RELA, 8, 16)))
-    fmt_RRI8_bb     = (3, (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, 1, 12), Operand(Operand.RELA, 8, 16)))
-    fmt_RI16        = (3, (Operand(Operand.REG, 4, 4), Operand(Operand.MEM, 16, 8, dt=dt_dword)))
-    fmt_BRI8        = (3, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.RELA, 8, 16)))
-    fmt_BRI8_imm    = (3, (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 12, xlate = b4const), Operand(Operand.RELA, 8, 16)))
-    fmt_BRI8_immu   = (3, (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 12, xlate = b4constu), Operand(Operand.RELA, 8, 16)))
-    fmt_BRI12       = (3, (Operand(Operand.REG, 4, 8), Operand(Operand.RELA, 12, 12)))
-    fmt_RI12S3      = (3, (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 12, 12, vshift=3)))
-    fmt_CALL        = (3, (Operand(Operand.RELA, 18, 6),))
-    fmt_CALL_sh     = (3, (Operand(Operand.RELAL, 18, 6),))
-    fmt_CALLX       = (3, (Operand(Operand.REG, 4, 8),))
-    fmt_RSR         = (3, (Operand(Operand.IMM, 8, 8), Operand(Operand.REG, 4, 4)))
-    fmt_RSR_spec    = (3, (Operand(Operand.REG, 4, 4),))
-    fmt_RRRN        = (2, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.REG, 4, 4)))
-    fmt_RRRN_addi   = (2, (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, xlate=addin)))
-    fmt_RRRN_2r     = (2, (Operand(Operand.REG, 4, 4), Operand(Operand.REG, 4, 8)))
-    fmt_RRRN_disp   = (2, (Operand(Operand.REG, 4, 4), Operand(Operand.MEM_INDEX, 4, 12, vshift=2, regbase=(4, 8))))
-    fmt_RI6         = (2, (Operand(Operand.REG, 4, 8), Operand(Operand.RELU, 4, 12, 2, 4)))
-    fmt_RI7         = (2, (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 12, 3, 4, xlate=movi_n)))
-
-    def __init__(self, name, opcode, mask, fmt, flags = 0):
-        self.name = name
-        self.opcode = opcode
-        self.mask = mask
-        (self.size, self.fmt) = fmt
-        self.flags = flags
-
-    def match(self, op):
-        return (op & self.mask) == self.opcode
-
-    def parseOperands(self, operands, op, cmd = None):
-        for ret, fmt in zip(operands, self.fmt):
-            fmt.parse(ret, op, cmd)
-
-    def __str__(self):
-        return "<Instr %s %x/%x>" % (self.name, self.opcode, self.mask)
+    fmt_NONE        = ()
+    fmt_RRR         = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.REG, 4, 4))
+    fmt_RRR_extui   = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 4, 8, 1, 16), Operand(Operand.IMM, 4, 20, off=1))
+    fmt_RRR_sext    = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, off=7))
+    fmt_RRR_1imm    = (Operand(Operand.IMM, 4, 8),)
+    fmt_RRR_2imm    = (Operand(Operand.IMM, 4, 8), Operand(Operand.IMM, 4, 4))
+    fmt_RRR_immr    = (Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 4, 8))
+    fmt_RRR_2r      = (Operand(Operand.REG, 4, 4), Operand(Operand.REG, 4, 8))
+    fmt_RRR_2rr     = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 4))
+    fmt_RRR_sll     = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8))
+    fmt_RRR_slli    = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, 1, 20, xlate=shimm))
+    fmt_RRR_srai    = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 4, 8, 1, 20))
+    fmt_RRR_sh      = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 4, 8))
+    fmt_RRR_ssa     = (Operand(Operand.REG, 4, 8),)
+    fmt_RRR_ssai    = (Operand(Operand.IMM, 4, 8, 1, 4),)
+    fmt_RRI8        = (Operand(Operand.REG, 4, 4), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 8, 16, signext = True))
+    fmt_RRI8_addmi  = (Operand(Operand.REG, 4, 4), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 8, 16, signext = True, vshift=8, dt=dt_dword))
+    fmt_RRI8_i12    = (Operand(Operand.REG, 4, 4), Operand(Operand.IMM, 8, 16, 4, 8, dt=dt_word))
+    fmt_RRI8_disp   = (Operand(Operand.REG, 4, 4), Operand(Operand.MEM_INDEX, 8, 16, vshift=0, regbase=(4, 8)))
+    fmt_RRI8_disp16 = (Operand(Operand.REG, 4, 4), Operand(Operand.MEM_INDEX, 8, 16, vshift=1, dt=dt_word, regbase=(4, 8)))
+    fmt_RRI8_disp32 = (Operand(Operand.REG, 4, 4), Operand(Operand.MEM_INDEX, 8, 16, vshift=2, dt=dt_dword, regbase=(4, 8)))
+    fmt_RRI8_b      = (Operand(Operand.REG, 4, 8), Operand(Operand.REG, 4, 4), Operand(Operand.RELA, 8, 16))
+    fmt_RRI8_bb     = (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, 1, 12), Operand(Operand.RELA, 8, 16))
+    fmt_RI16        = (Operand(Operand.REG, 4, 4), Operand(Operand.MEM, 16, 8, dt=dt_dword))
+    fmt_BRI8        = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.RELA, 8, 16))
+    fmt_BRI8_imm    = (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 12, xlate = b4const), Operand(Operand.RELA, 8, 16))
+    fmt_BRI8_immu   = (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 12, xlate = b4constu), Operand(Operand.RELA, 8, 16))
+    fmt_BRI12       = (Operand(Operand.REG, 4, 8), Operand(Operand.RELA, 12, 12))
+    fmt_RI12S3      = (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 12, 12, vshift=3))
+    fmt_CALL        = (Operand(Operand.RELA, 18, 6),)
+    fmt_CALL_sh     = (Operand(Operand.RELAL, 18, 6),)
+    fmt_CALLX       = (Operand(Operand.REG, 4, 8),)
+    fmt_RSR         = (Operand(Operand.IMM, 8, 8), Operand(Operand.REG, 4, 4))
+    fmt_RSR_spec    = (Operand(Operand.REG, 4, 4),)
+    
+    fmt_NONEN       = ()
+    fmt_RRRN        = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.REG, 4, 4))
+    fmt_RRRN_addi   = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, xlate=addin))
+    fmt_RRRN_2r     = (Operand(Operand.REG, 4, 4), Operand(Operand.REG, 4, 8))
+    fmt_RRRN_disp   = (Operand(Operand.REG, 4, 4), Operand(Operand.MEM_INDEX, 4, 12, vshift=2, regbase=(4, 8)))
+    fmt_RI6         = (Operand(Operand.REG, 4, 8), Operand(Operand.RELU, 4, 12, 2, 4))
+    fmt_RI7         = (Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 12, 3, 4, xlate=movi_n))
 
 class XtensaProcessor(processor_t):
+    # IDP id ( Numbers above 0x8000 are reserved for the third-party modules)
     id = 0x8000 + 1990
+    # Processor features
     flag = PR_SEGS | PR_DEFSEG32 | PR_RNAMESOK | PR_ADJSEGS | PRN_HEX | PR_USE32
+    # Number of bits in a byte for code segments (usually 8)
     cnbits = 8
+    # Number of bits in a byte for non-code segments (usually 8)
     dnbits = 8
+    # Short processor names
     psnames = ["xtensa"]
+    # Long processor names
     plnames = ["Tensilica Xtensa"]
+    # Size of a segment register in bytes
     segreg_size = 0
     tbyte_size = 0
 
-    instruc_start = 0
-
     assembler = {
-        "flag": ASH_HEXF3 | ASD_DECF0 | ASO_OCTF1 | ASB_BINF3 | AS_NOTAB
-            | AS_ASCIIC | AS_ASCIIZ,
+        "flag": ASH_HEXF3 | ASD_DECF0 | ASO_OCTF1 | ASB_BINF3 | AS_NOTAB | AS_ASCIIC | AS_ASCIIZ,
         "uflag": 0,
         "name": "GNU assembler",
         "origin": ".org",
@@ -232,232 +217,270 @@ class XtensaProcessor(processor_t):
         "a_shr": ">>",
         "a_sizeof_fmt": "size %s",
     }
+    
+    regNames = [
+        "a0",
+        "a1",
+        "a2",
+        "a3",
+        "a4",
+        "a5",
+        "a6",
+        "a7",
+        "a8",
+        "a9",
+        "a10",
+        "a11",
+        "a12",
+        "a13",
+        "a14",
+        "a15",
+        "pc",
+        "sar",
+        # Fake registers
+        "CS",
+        "DS",
+    ]
+    
+    regFirstSreg = regCodeSreg = len(regNames) - 2
+    regLastSreg = regDataSreg = len(regNames) - 1
 
-    ops = (
-        ("abs",    0x600100, 0xff0f0f, Instr.fmt_RRR_2rr ),
-        ("add",    0x800000, 0xff000f, Instr.fmt_RRR ),
-        ("addi",   0x00c002, 0x00f00f, Instr.fmt_RRI8 ),
-        ("addmi",  0x00d002, 0x00f00f, Instr.fmt_RRI8_addmi ),
-        ("addx2",  0x900000, 0xff000f, Instr.fmt_RRR ),
-        ("addx4",  0xa00000, 0xff000f, Instr.fmt_RRR ),
-        ("addx8",  0xb00000, 0xff000f, Instr.fmt_RRR ),
-        ("and",    0x100000, 0xff000f, Instr.fmt_RRR ),
-        ("ball",   0x004007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bany",   0x008007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bbc",    0x005007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bbs",    0x00d007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bbci",   0x006007, 0x00e00f, Instr.fmt_RRI8_bb ),
-        ("bbsi",   0x00e007, 0x00e00f, Instr.fmt_RRI8_bb ),
-        ("beq",    0x001007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("beqi",   0x000026, 0x0000ff, Instr.fmt_BRI8_imm ), # was RRI8
-        ("beqz",   0x000016, 0x0000ff, Instr.fmt_BRI12 ),
-        ("bge",    0x00a007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bgei",   0x0000e6, 0x0000ff, Instr.fmt_BRI8_imm ),
-        ("bgeu",   0x00b007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bgeui",  0x0000f6, 0x0000ff, Instr.fmt_BRI8_immu ),
-        ("bgez",   0x0000d6, 0x0000ff, Instr.fmt_BRI12 ),
-        ("blt",    0x002007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("blti",   0x0000a6, 0x0000ff, Instr.fmt_BRI8_imm ),
-        ("bltu",   0x003007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bltui",  0x0000b6, 0x0000ff, Instr.fmt_BRI8_immu ),
-        ("bltz",   0x000096, 0x0000ff, Instr.fmt_BRI12 ),
-        ("bnall",  0x00c007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bnone",  0x000007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bne",    0x009007, 0x00f00f, Instr.fmt_RRI8_b ),
-        ("bnei",   0x000066, 0x0000ff, Instr.fmt_BRI8_imm ),
-        ("bnez",   0x000056, 0x0000ff, Instr.fmt_BRI12 ),
-        ("break",  0x004000, 0xfff00f, Instr.fmt_RRR_2imm ),
-        ("call0",  0x000005, 0x00003f, Instr.fmt_CALL_sh, CF_CALL ),
-        ("call4",  0x000015, 0x00003f, Instr.fmt_CALL_sh, CF_CALL ),
-        ("call8",  0x000025, 0x00003f, Instr.fmt_CALL_sh, CF_CALL ),
-        ("call12", 0x000035, 0x00003f, Instr.fmt_CALL_sh, CF_CALL ),
-        ("callx0", 0x0000c0, 0xfff0ff, Instr.fmt_CALLX, CF_CALL | CF_JUMP ),
-        ("callx4", 0x0000d0, 0xfff0ff, Instr.fmt_CALLX, CF_CALL | CF_JUMP ),
-        ("callx8", 0x0000e0, 0xfff0ff, Instr.fmt_CALLX, CF_CALL | CF_JUMP ),
-        ("callx12",0x0000f0, 0xfff0ff, Instr.fmt_CALLX, CF_CALL | CF_JUMP ),
-        ("dsync",  0x002030, 0xffffff, Instr.fmt_NONE ),
-        ("entry",  0x000036, 0x0000ff, Instr.fmt_RI12S3 ),
-        ("esync",  0x002020, 0xffffff, Instr.fmt_NONE ),
-        ("extui",  0x040000, 0x0e000f, Instr.fmt_RRR_extui ),
-        ("extw",   0x0020d0, 0xffffff, Instr.fmt_NONE ),
-        ("isync",  0x002000, 0xffffff, Instr.fmt_NONE ),
-#       ("ill",    0x000000, 0xffffff, Instr.fmt_NONE ),    # normally one not need this
-        ("j",      0x000006, 0x00003f, Instr.fmt_CALL, CF_STOP ),
-        ("jx",     0x0000a0, 0xfff0ff, Instr.fmt_CALLX, CF_STOP | CF_JUMP ),
-        ("l8ui",   0x000002, 0x00f00f, Instr.fmt_RRI8_disp ),
-        ("l16si",  0x009002, 0x00f00f, Instr.fmt_RRI8_disp16 ),
-        ("l16ui",  0x001002, 0x00f00f, Instr.fmt_RRI8_disp16 ),
-        ("l32i",   0x002002, 0x00f00f, Instr.fmt_RRI8_disp32 ),
-        ("l32r",   0x000001, 0x00000f, Instr.fmt_RI16 ),
-        ("memw",   0x0020c0, 0xffffff, Instr.fmt_NONE ),
-        ("moveqz", 0x830000, 0xff000f, Instr.fmt_RRR ),
-        ("movgez", 0xb30000, 0xff000f, Instr.fmt_RRR ),
-        ("movi",   0x00a002, 0x00f00f, Instr.fmt_RRI8_i12 ),
-        ("movltz", 0xa30000, 0xff000f, Instr.fmt_RRR ),
-        ("movnez", 0x930000, 0xff000f, Instr.fmt_RRR ),
-        ("mul16s", 0xd10000, 0xff000f, Instr.fmt_RRR ),
-        ("mul16u", 0xc10000, 0xff000f, Instr.fmt_RRR ),
-        ("mull",   0x820000, 0xff000f, Instr.fmt_RRR ),
-        ("muluh",  0xa20000, 0xff000f, Instr.fmt_RRR ),
-        ("neg",    0x600000, 0xff0f0f, Instr.fmt_RRR_2rr ),
-        ("nsa",    0x40e000, 0xfff00f, Instr.fmt_RRR_2r ),
-        ("nsau",   0x40f000, 0xfff00f, Instr.fmt_RRR_2r ),
-        ("nop",    0x0020f0, 0xffffff, Instr.fmt_NONE ),
-        ("or",     0x200000, 0xff000f, Instr.fmt_RRR ),
-        ("ret",    0x000080, 0xffffff, Instr.fmt_NONE, CF_STOP ),
-        ("retw.n", 0x00f01d, 0x00ffff, Instr.fmt_NNONE, CF_STOP ),
-        ("rfe",    0x003000, 0xffffff, Instr.fmt_NONE, CF_STOP ),
-        ("rfi",    0x003010, 0xfff0ff, Instr.fmt_RRR_1imm, CF_STOP ),
-        ("rsil",   0x006000, 0xfff00f, Instr.fmt_RRR_immr ),
-        ("rsr.prid",      0x03eb00, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.epc1",      0x03b100, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.epc2",      0x03b200, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.epc3",      0x03b300, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.epc4",      0x03b400, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.epc5",      0x03b500, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.epc6",      0x03b600, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.epc7",      0x03b700, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.ps",        0x03e600, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.exccause",  0x03e800, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.ccount",    0x03e400, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.excvaddr",  0x03ee00, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.depc",      0x03c000, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.prid",      0x03eb00, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.ccompare0", 0x03f000, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.interrupt", 0x03e200, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.intenable", 0x03e400, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.sar",       0x030300, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr.ddr",       0x036800, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("rsr",    0x030000, 0xff000f, Instr.fmt_RSR ),
-        ("rsync",  0x002010, 0xffffff, Instr.fmt_NONE ),
-        ("s8i",    0x004002, 0x00f00f, Instr.fmt_RRI8_disp ),
-        ("s16i",   0x005002, 0x00f00f, Instr.fmt_RRI8_disp16 ),
-        ("s32i",   0x006002, 0x00f00f, Instr.fmt_RRI8_disp32 ),
-        ("sext",   0x230000, 0xff000f, Instr.fmt_RRR_sext ),
-        ("sll",    0xa10000, 0xff00ff, Instr.fmt_RRR_sll ),
-        ("slli",   0x010000, 0xef000f, Instr.fmt_RRR_slli ),
-        ("sra",    0xb10000, 0xff0f0f, Instr.fmt_RRR_2rr ),
-        ("srai",   0x210000, 0xef000f, Instr.fmt_RRR_srai ),
-        ("src",    0x810000, 0xff000f, Instr.fmt_RRR ),
-        ("srl",    0x910000, 0xff0f0f, Instr.fmt_RRR_2rr ),
-        ("srli",   0x410000, 0xff000f, Instr.fmt_RRR_sh ),
-        ("ssa8b",  0x403000, 0xfff0ff, Instr.fmt_RRR_ssa ),
-        ("ssa8l",  0x402000, 0xfff0ff, Instr.fmt_RRR_ssa ),
-        ("ssai",   0x404000, 0xfff0ef, Instr.fmt_RRR_ssai ),
-        ("ssl",    0x401000, 0xfff0ff, Instr.fmt_RRR_ssa ),
-        ("ssr",    0x400000, 0xfff0ff, Instr.fmt_RRR_ssa ),
-        ("sub",    0xc00000, 0xff000f, Instr.fmt_RRR ),
-        ("subx2",  0xd00000, 0xff000f, Instr.fmt_RRR ),
-        ("subx4",  0xe00000, 0xff000f, Instr.fmt_RRR ),
-        ("subx8",  0xf00000, 0xff000f, Instr.fmt_RRR ),
-        ("waiti",  0x007000, 0xfff0ff, Instr.fmt_RRR_1imm ),
-        ("wdtlb",  0x50e000, 0xfff00f, Instr.fmt_RRR_2r ),
-        ("witlb",  0x506000, 0xfff00f, Instr.fmt_RRR_2r ),
-        ("wsr.intenable", 0x13e400, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("wsr.litbase",   0x130500, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("wsr.vecbase",   0x13e700, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("wsr.ps",        0x13e600, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("wsr.epc1",      0x13b100, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("wsr.ccompare0", 0x13f000, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("wsr.intclear",  0x13e300, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("wsr.sar",       0x130300, 0xffff0f, Instr.fmt_RSR_spec ),
-        ("wsr",    0x130000, 0xff000f, Instr.fmt_RSR ),
-        ("xor",    0x300000, 0xff000f, Instr.fmt_RRR ),
-        ("xsr",    0x610000, 0xff000f, Instr.fmt_RSR ),
+    # Instruction definintions
+    instruc = [
+#       { "name": "ill",         "opc": 0x000000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        
+        # Core Instruction Set
+        { "name": "and",         "opc": 0x100000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "or",          "opc": 0x200000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "xor",         "opc": 0x300000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "add",         "opc": 0x800000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "addx2",       "opc": 0x900000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "addx2",       "opc": 0x900000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "addx4",       "opc": 0xa00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "addx8",       "opc": 0xb00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "addx8",       "opc": 0xb00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "sub",         "opc": 0xc00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "subx2",       "opc": 0xd00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "subx4",       "opc": 0xe00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "subx8",       "opc": 0xf00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "slli",        "opc": 0x010000, "mask": 0xef000f, "fmt": Instr.fmt_RRR_slli, "feature": 0 },
+        { "name": "srai",        "opc": 0x210000, "mask": 0xef000f, "fmt": Instr.fmt_RRR_srai, "feature": 0 },
+        { "name": "srli",        "opc": 0x410000, "mask": 0xff000f, "fmt": Instr.fmt_RRR_sh, "feature": 0 },
+        { "name": "xsr",         "opc": 0x610000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": 0 },
+        { "name": "src",         "opc": 0x810000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "srl",         "opc": 0x910000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": 0 },
+        { "name": "sll",         "opc": 0xa10000, "mask": 0xff00ff, "fmt": Instr.fmt_RRR_sll, "feature": 0 },
+        { "name": "sra",         "opc": 0xb10000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": 0 },
+        { "name": "rsr",         "opc": 0x030000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": 0 },
+        { "name": "wsr",         "opc": 0x130000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": 0 },
+        { "name": "moveqz",      "opc": 0x830000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "movnez",      "opc": 0x930000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "movltz",      "opc": 0xa30000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "movgez",      "opc": 0xb30000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        
+        { "name": "jx",          "opc": 0x0000a0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_STOP | CF_JUMP },
+        { "name": "callx0",      "opc": 0x0000c0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP },
+        
+        { "name": "ssr",         "opc": 0x400000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": 0 },
+        { "name": "ssl",         "opc": 0x401000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": 0 },
+        { "name": "ssa8l",       "opc": 0x402000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": 0 },
+        { "name": "ssa8b",       "opc": 0x403000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": 0 },
+        { "name": "ssai",        "opc": 0x404000, "mask": 0xfff0ef, "fmt": Instr.fmt_RRR_ssai, "feature": 0 },
+        { "name": "neg",         "opc": 0x600000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": 0 },
+        { "name": "abs",         "opc": 0x600100, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": 0 },
+        { "name": "break",       "opc": 0x004000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2imm, "feature": 0 },
+        { "name": "extui",       "opc": 0x040000, "mask": 0x0e000f, "fmt": Instr.fmt_RRR_extui, "feature": 0 },
+        { "name": "extw",        "opc": 0x0020d0, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "isync",       "opc": 0x002000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "rsync",       "opc": 0x002010, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "esync",       "opc": 0x002020, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "dsync",       "opc": 0x002030, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "memw",        "opc": 0x0020c0, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "nop",         "opc": 0x0020f0, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "ret",         "opc": 0x000080, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": CF_STOP },
+        { "name": "rfe",         "opc": 0x003000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": CF_STOP },
+        { "name": "rfi",         "opc": 0x003010, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_1imm, "feature": CF_STOP },
+        { "name": "rsil",        "opc": 0x006000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_immr, "feature": 0 },
+        { "name": "wdtlb",       "opc": 0x50e000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": 0 },
+        { "name": "witlb",       "opc": 0x506000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": 0 },
+        { "name": "waiti",       "opc": 0x007000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_1imm, "feature": 0 },
+        
+        { "name": "l32r",        "opc": 0x000001, "mask": 0x00000f, "fmt": Instr.fmt_RI16, "feature": 0 },
+        
+        { "name": "l8ui",        "opc": 0x000002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp, "feature": 0 },
+        { "name": "l16ui",       "opc": 0x001002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": 0 },
+        { "name": "l32i",        "opc": 0x002002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp32, "feature": 0 },
+        { "name": "s8i",         "opc": 0x004002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp, "feature": 0 },
+        { "name": "s16i",        "opc": 0x005002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": 0 },
+        { "name": "s32i",        "opc": 0x006002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp32, "feature": 0 },
+        { "name": "l16si",       "opc": 0x009002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": 0 },
+        { "name": "movi",        "opc": 0x00a002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_i12, "feature": 0 },
+        { "name": "addi",        "opc": 0x00c002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8, "feature": 0 },
+        { "name": "addmi",       "opc": 0x00d002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_addmi, "feature": 0 },
 
-        ("add.n",   0x000a, 0x000f, Instr.fmt_RRRN ),
-        ("addi.n",  0x000b, 0x000f, Instr.fmt_RRRN_addi ),
-        ("beqz.n",  0x008c, 0x00cf, Instr.fmt_RI6 ),
-        ("bnez.n",  0x00cc, 0x00cf, Instr.fmt_RI6 ),
-        ("mov.n",   0x000d, 0xf00f, Instr.fmt_RRRN_2r ),
-        ("break.n", 0xf02d, 0xf0ff, Instr.fmt_RRRN ),
-        ("ret.n",   0xf00d, 0xffff, Instr.fmt_NNONE, CF_STOP ),
-        ("l32i.n",  0x0008, 0x000f, Instr.fmt_RRRN_disp ),
-        ("movi.n",  0x000c, 0x008f, Instr.fmt_RI7 ),
-        ("nop.n",   0xf03d, 0xffff, Instr.fmt_NNONE ),
-        ("s32i.n",  0x0009, 0x000f, Instr.fmt_RRRN_disp ),
-    )
+        { "name": "call0",       "opc": 0x000005, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL },
+        
+        { "name": "j",           "opc": 0x000006, "mask": 0x00003f, "fmt": Instr.fmt_CALL, "feature": CF_STOP },
+        { "name": "beqz",        "opc": 0x000016, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": 0 },
+        { "name": "beqi",        "opc": 0x000026, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": 0 },
+        { "name": "bnez",        "opc": 0x000056, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": 0 },
+        { "name": "bnei",        "opc": 0x000066, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": 0 },
+        { "name": "bltz",        "opc": 0x000096, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": 0 },
+        { "name": "blti",        "opc": 0x0000a6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": 0 },
+        { "name": "bltui",       "opc": 0x0000b6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_immu, "feature": 0 },
+        { "name": "bgez",        "opc": 0x0000d6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": 0 },
+        { "name": "bgei",        "opc": 0x0000e6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": 0 },
+        { "name": "bgeui",       "opc": 0x0000f6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_immu, "feature": 0 },
+        
+        { "name": "bnone",       "opc": 0x000007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "beq",         "opc": 0x001007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "blt",         "opc": 0x002007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bltu",        "opc": 0x003007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "ball",        "opc": 0x004007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bbc",         "opc": 0x005007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bbci",        "opc": 0x006007, "mask": 0x00e00f, "fmt": Instr.fmt_RRI8_bb, "feature": 0 },
+        { "name": "bany",        "opc": 0x008007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bne",         "opc": 0x009007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bge",         "opc": 0x00a007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bgeu",        "opc": 0x00b007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bnall",       "opc": 0x00c007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bbs",         "opc": 0x00d007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
+        { "name": "bbsi",        "opc": 0x00e007, "mask": 0x00e00f, "fmt": Instr.fmt_RRI8_bb, "feature": 0 },
+    
+        # 16-bit Integer Multiply Option
+        { "name": "mul16s",      "opc": 0xd10000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "mul16u",      "opc": 0xc10000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        
+        # 32-bit Integer Multiply Option
+        { "name": "mull",        "opc": 0x820000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "muluh",       "opc": 0xa20000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        
+        # Miscellaneous Operations Option
+        { "name": "nsa",         "opc": 0x40e000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": 0 },
+        { "name": "nsau",        "opc": 0x40f000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": 0 },
+        { "name": "sext",        "opc": 0x230000, "mask": 0xff000f, "fmt": Instr.fmt_RRR_sext, "feature": 0 },
+        
+        # Windowed Register Option
+        { "name": "callx4",      "opc": 0x0000d0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP },
+        { "name": "callx8",      "opc": 0x0000e0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP },
+        { "name": "callx12",     "opc": 0x0000f0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP },
+        { "name": "call4",       "opc": 0x000015, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL },
+        { "name": "call8",       "opc": 0x000025, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL },
+        { "name": "call12",      "opc": 0x000035, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL },
+        { "name": "entry",       "opc": 0x000036, "mask": 0x0000ff, "fmt": Instr.fmt_RI12S3, "feature": 0 },
+        { "name": "retw.n",      "opc": 0x00f01d, "mask": 0xffffff, "fmt": Instr.fmt_NONEN, "feature": CF_STOP },
+
+        # Code Density Option
+        { "name": "l32i.n",      "opc": 0x000008, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_disp, "feature": 0 },
+        { "name": "s32i.n",      "opc": 0x000009, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_disp, "feature": 0 },
+        { "name": "add.n",       "opc": 0x00000a, "mask": 0xff000f, "fmt": Instr.fmt_RRRN, "feature": 0 },
+        { "name": "addi.n",      "opc": 0x00000b, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_addi, "feature": 0 },
+        { "name": "movi.n",      "opc": 0x00000c, "mask": 0xff008f, "fmt": Instr.fmt_RI7, "feature": 0 },
+        { "name": "beqz.n",      "opc": 0x00008c, "mask": 0xff00cf, "fmt": Instr.fmt_RI6, "feature": 0 },
+        { "name": "bnez.n",      "opc": 0x0000cc, "mask": 0xff00cf, "fmt": Instr.fmt_RI6, "feature": 0 },
+        { "name": "mov.n",       "opc": 0x00000d, "mask": 0xfff00f, "fmt": Instr.fmt_RRRN_2r, "feature": 0 },
+        { "name": "ret.n",       "opc": 0x00f00d, "mask": 0xffffff, "fmt": Instr.fmt_NONEN, "feature": CF_STOP },
+        { "name": "break.n",     "opc": 0x00f02d, "mask": 0xfff0ff, "fmt": Instr.fmt_RRRN, "feature": 0 },
+        { "name": "nop.n",       "opc": 0x00f03d, "mask": 0xffffff, "fmt": Instr.fmt_NONEN, "feature": 0 },
+    ]
+    instruc_start = 0
+    instruc_end = len(instruc)
 
     def __init__(self):
         processor_t.__init__(self)
-        self._init_instructions()
-        self._init_registers()
+        # Analysis options:
+        self._tighten_enabled = True
 
-    def _add_instruction(self, instr):
-        self.instrs_list.append(instr)
+    def _decode_cmd_length(self):
+        """Determine whether this is a 24-bit or 16-bit instruction"""
+        if get_full_byte(self.cmd.ea) & 0x08:
+            return 2
+        else:
+            return 3
 
-    def _init_instructions(self):
-        self.instrs_list = []
-        self.short_insts = []
-        self.long_insts = []
+    def _mnem_to_id(self, mnem):
+        for i in xrange(XtensaProcessor.instruc_end):
+            instr = self._instr_from_id(i)
+            if instr["name"] == mnem:
+                return i
+        return None
+        
+    def _instr_from_id(self, i):
+        return XtensaProcessor.instruc[i]
 
-        for o in self.ops:
-            instr = Instr(*o)
-            self._add_instruction(instr)
-            if instr.size == 2:
-                self.short_insts.append(instr)
-            else:
-                self.long_insts.append(instr)
+    def _tighten(self):
+        """Undoes some of relaxation done by `as`"""
+        instr = self._instr_from_id(self.cmd.itype)
+        
+        if instr["name"] == "l32r":
+            # Transform l32r into movi
+            self.cmd.itype = self._mnem_to_id("movi")
+            addr = self.cmd[1].addr
+            ua_dodata2(0, addr, dt_dword)
+            self.cmd[1].type = o_imm
+            self.cmd[1].value = get_long(addr)
 
-        self.instruc = [{ "name": i.name, "feature": i.flags } for i in self.instrs_list]
-        self.instruc_end = len(self.instruc)
+    def _trace_sp(self):
+        """Trace SP flow"""
+        func = get_func(self.cmd.ea)
+        if not func:
+            return
+        instr = self._instr_from_id(self.cmd.itype)
+        if instr["name"] in ("addi", "addmi") and self.cmd[0].reg == 1 and self.cmd[1].reg == 1:
+            offset = ida_signed(self.cmd[2].value)
+            add_auto_stkpnt2(func, self.cmd.ea + self.cmd.size, offset)
 
-        self.instrs = {}
-        for instr in self.instrs_list:
-            self.instrs[instr.name] = instr
-
-        self.instrs_ids = {}
-        for i, instr in enumerate(self.instrs_list):
-            self.instrs_ids[instr.name] = i
-            instr.id = i
-
-    def _init_registers(self):
-        self.regNames = ["a%d" % d for d in range(16)]
-        self.regNames += ["pc", "sar", "CS", "DS"]
-        self.reg_ids = {}
-        for i, reg in enumerate(self.regNames):
-            self.reg_ids[reg] = i
-
-        self.regFirstSreg = self.regCodeSreg = self.reg_ids["CS"]
-        self.regLastSreg = self.regDataSreg = self.reg_ids["DS"]
-
-    def _pull_op_byte(self):
-        ea = self.cmd.ea + self.cmd.size
-        byte = get_full_byte(ea)
-        self.cmd.size += 1
-        return byte
-
-    def _find_instr(self):
-        op = self._pull_op_byte()
-        op |= self._pull_op_byte() << 8
-
-        for instr in self.short_insts:
-            if instr.match(op):
-                return instr, op
-
-        op |= self._pull_op_byte() << 16
-
-        for instr in self.long_insts:
-            if instr.match(op):
-                return instr, op
-
-        return None, op
+    # IDA callbacks
 
     def ana(self):
-        instr, op = self._find_instr()
-        if not instr:
+        """Analyse and decode the current instruction into `cmd`"""
+
+        # Determine how long the opcode is
+        self.cmd.size = self._decode_cmd_length()
+        
+        # Fetch the opcode
+        opcode = get_full_byte(self.cmd.ea + 0)
+        opcode |= get_full_byte(self.cmd.ea + 1) << 8
+        if self.cmd.size == 3:
+            opcode |= get_full_byte(self.cmd.ea + 2) << 16
+            
+        # Find the corresponding insn
+        for i in xrange(XtensaProcessor.instruc_end):
+            instr = self._instr_from_id(i)
+            if (opcode & instr["mask"]) == instr["opc"]:
+                self.cmd.itype = i
+                break
+        else:
+            # Not found; fail the decoding.
             return 0
-
-        self.cmd.itype = instr.id
-
+            
+        # Parse the operands
         operands = [self.cmd[i] for i in range(6)]
         for o in operands:
             o.type = o_void
-        instr.parseOperands(operands, op, self.cmd)
+        for op, fmt in zip(operands, instr["fmt"]):
+            fmt.parse(op, opcode, self.cmd)
+        
+        # Undo some relaxation done by `as`
+        # Ref: http://web.mit.edu/rhel-doc/3/rhel-as-en-3/xtensa-relaxation.html
+        if self._tighten_enabled:
+            self._tighten()
 
+        # Done
         return self.cmd.size
 
     def emu(self):
+        """
+        Emulate instruction, create cross-references, 
+        plan to analyze subsequent instructions, modify flags etc. 
+        Upon entrance to this function all information about 
+        the instruction is in 'cmd' structure.
+
+        If zero is returned, the kernel will delete the instruction.
+        """
+        instr = self._instr_from_id(self.cmd.itype)
+                
+        # Handle operands
         for i in range(6):
             op = self.cmd[i]
             if op.type == o_void:
@@ -472,24 +495,46 @@ class XtensaProcessor(processor_t):
                 else:
                     fl = fl_JN
                 ua_add_cref(0, op.addr, fl)
+            elif op.type == o_displ:
+                if may_create_stkvars() and op.reg == 1:
+                    func = get_func(self.cmd.ea)
+                    if func and ua_stkvar2(op, op.addr, STKVAR_VALID_SIZE):
+                        op_stkvar(self.cmd.ea, op.n)
 
+        # Handle features
         feature = self.cmd.get_canon_feature()
         if feature & CF_JUMP:
             QueueMark(Q_jumps, self.cmd.ea)
-        if not feature & CF_STOP:
+        flow = not ((feature & CF_STOP) or (False))
+        if flow:
             ua_add_cref(0, self.cmd.ea + self.cmd.size, fl_F)
+
+        # Handle SP changes
+        if may_trace_sp():
+            if flow:
+                self._trace_sp()
+            else:
+                recalc_spd(self.cmd.ea)
+
         return True
 
     def outop(self, op):
+        """Generate text representation of an instructon operand"""
+
         if op.type == o_reg:
             out_register(self.regNames[op.reg])
+            
         elif op.type == o_imm:
-            instr = self.instrs_list[self.cmd.itype]
-            if instr.name in ("extui", "bbci", "bbsi", "slli", "srli", "srai", "ssai"):
+            instr = self._instr_from_id(self.cmd.itype)
+            if instr["name"] in ("extui", "bbci", "bbsi", "slli", "srli", "srai", "ssai"):
                 # bit numbers/shifts are always decimal
                 OutLong(op.value, 10)
+            elif instr["name"] in ("addi", "addmi", "addi.n"):
+                # immediate values for these are always signed
+                OutValue(op, OOFW_IMM|OOF_SIGNED)
             else:
                 OutValue(op, OOFW_IMM)
+                
         elif op.type in (o_near, o_mem):
             ok = out_name_expr(op, op.addr, BADADDR)
             if not ok:
@@ -497,20 +542,25 @@ class XtensaProcessor(processor_t):
                 OutLong(op.addr, 16)
                 out_tagoff(COLOR_ERROR)
                 QueueMark(Q_noName, self.cmd.ea)
+                
         elif op.type == o_displ:
-            out_register(self.regNames[op.phrase])
+            out_register(self.regNames[op.reg])
             OutLine(", ")
             OutValue(op, OOF_ADDR)
+            
         else:
             return False
         return True
 
     def out(self):
+        """Generate text representation of an instruction in the `cmd` structure"""
+        
         buf = init_output_buffer(1024)
+        instr = self._instr_from_id(self.cmd.itype)
+
+        # Output the instruction's mnemonic
         OutMnem(15)
-
-        instr = self.instrs_list[self.cmd.itype]
-
+        # Output each operand
         for i in range(6):
             if self.cmd[i].type == o_void:
                 break
@@ -524,47 +574,10 @@ class XtensaProcessor(processor_t):
         cvar.gl_comm = 1
         MakeLine(buf)
 
+    def is_sp_based(self, op):
+        """IDA HACK: check if `op` is SP or FP based"""
+        return 1
 
 def PROCESSOR_ENTRY():
     return XtensaProcessor()
-
-if __name__ == "__main__":
-    class DummyProcessor(XtensaProcessor):
-        def __init__(self, b):
-            XtensaProcessor.__init__(self)
-            self.b = b
-
-        def _pull_op_byte(self):
-            return self.b.pop(0)
-
-    def disasm(b):
-        dp = DummyProcessor([ord(ch) for ch in b])
-        instr, op = dp._find_instr()
-        assert instr
-
-        class cmd(object):
-            ea = 1234
-
-        instr.operands = []
-        for operand in instr.fmt:
-            o = copy.copy(operand)
-            operand.parse(o, op, cmd)
-            instr.operands.append(o)
-        return instr
-
-    assert disasm("\x36\x61\x00").name == "entry"
-    assert disasm("\xd0\x04\x00").name == "callx4"
-    assert disasm("\xe0\x08\x00").name == "callx8"
-    assert disasm("\xf0\x00\x00").name == "callx12"
-    assert disasm("\x1d\xf0").name == "retw.n"
-    assert disasm("\x55\xa2\x28").name == "call4"
-    assert disasm("\xe5\xc7\x01").name == "call8"
-    assert disasm("\x75\x0c\xa9").name == "call12"
-    assert disasm("\x00\xbb\x23").name == "sext"
-    assert disasm("\x20\xba\xa2").name == "muluh"
-    assert disasm("\x2c\x08").name == "movi.n"
-    assert disasm("\x2c\x08").operands[0].reg == 8
-    assert disasm("\x2c\x08").operands[1].value == 32
-    assert disasm("\x1c\x68").operands[1].value == 22
-    assert disasm("\x4c\x00").operands[1].value == 64
-    assert disasm("\x6c\x11").operands[1].value == -31
+# EOF
