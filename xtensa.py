@@ -460,10 +460,10 @@ class XtensaProcessor(processor_t):
             op.type = o_imm
             op.value = value
             # Determine if this is a pointer or a number
-            # TODO: IDA is stubborn and doesn't want to set the optype manually
-            seg = getseg(value)
-            if seg:
-                set_offset(self.cmd.ea, 1, 0)
+            # TODO: IDA appears to crash ???
+            #seg = getseg(value)
+            #if seg and isLoaded(value):
+            #    set_offset(self.cmd.ea, 1, self.cmd.cs)
 
     def _trace_sp(self):
         """Trace SP flow"""
