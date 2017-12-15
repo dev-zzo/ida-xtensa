@@ -22,6 +22,7 @@ import copy
 
 try:
     from idaapi import *
+    o_sreg = o_idpspec0
 except ImportError:
     class processor_t(object):
         pass
@@ -38,7 +39,7 @@ def ida_signed(x):
     if (x & 0x80000000):
         return -(((~x) & 0x7FFFFFFF) + 1)
     return x
-    
+
 class Operand:
     REG     = 0
     IMM     = 1
@@ -102,8 +103,8 @@ class Operand:
             op.type = o_near
             op.addr = val + cmd.ea + 4
         elif self.type == Operand.SREG:
-            op.type = o_reg
-            op.reg = val | 0x100
+            op.type = o_sreg
+            op.reg = val
         else:
             raise ValueError("unhandled operand type");
 
@@ -160,9 +161,8 @@ class Instr(object):
     fmt_CALL        = (Operand(Operand.RELA, 18, 6),)
     fmt_CALL_sh     = (Operand(Operand.RELAL, 18, 6),)
     fmt_CALLX       = (Operand(Operand.REG, 4, 8),)
-    #fmt_RSR         = (Operand(Operand.IMM, 8, 8), Operand(Operand.REG, 4, 4))
     fmt_RSR         = (Operand(Operand.REG, 4, 4), Operand(Operand.SREG, 8, 8))
-    
+
     fmt_NONEN       = ()
     fmt_RRRN        = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.REG, 4, 4))
     fmt_RRRN_addi   = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.IMM, 4, 4, xlate=addin))
@@ -221,7 +221,7 @@ class XtensaProcessor(processor_t):
         "a_shr": ">>",
         "a_sizeof_fmt": "size %s",
     }
-    
+
     regNames = [
         # Core registers
         "a0",
@@ -246,12 +246,12 @@ class XtensaProcessor(processor_t):
         "CS",
         "DS",
     ]
-    
+
     regFirstSreg = regCodeSreg = len(regNames) - 2
     regLastSreg = regDataSreg = len(regNames) - 1
-    
+
     _srIdToName = {
-        3:   "sar", 
+        3:   "sar",
         5:   "litbase", # Extended L32R Option
         177: "epc1", # Exception Option
         178: "epc2", # High-Priority Interrupt Option
@@ -287,7 +287,7 @@ class XtensaProcessor(processor_t):
     # Instruction definintions
     instruc = [
 #       { "name": "ill",         "opc": 0x000000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
-        
+
         # Core Instruction Set
         { "name": "and",         "opc": 0x100000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "or",          "opc": 0x200000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
@@ -316,10 +316,10 @@ class XtensaProcessor(processor_t):
         { "name": "movnez",      "opc": 0x930000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "movltz",      "opc": 0xa30000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "movgez",      "opc": 0xb30000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
-        
+
         { "name": "jx",          "opc": 0x0000a0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_STOP | CF_JUMP | CF_USE1 },
         { "name": "callx0",      "opc": 0x0000c0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP | CF_USE1 },
-        
+
         { "name": "ssr",         "opc": 0x400000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": CF_USE1 },
         { "name": "ssl",         "opc": 0x401000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": CF_USE1 },
         { "name": "ssa8l",       "opc": 0x402000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": CF_USE1 },
@@ -337,9 +337,9 @@ class XtensaProcessor(processor_t):
         { "name": "nop",         "opc": 0x0020f0, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
         { "name": "break",       "opc": 0x004000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2imm, "feature": 0 },
         { "name": "ret",         "opc": 0x000080, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": CF_STOP },
-        
+
         { "name": "l32r",        "opc": 0x000001, "mask": 0x00000f, "fmt": Instr.fmt_RI16, "feature": CF_USE1 | CF_USE2 },
-        
+
         { "name": "l8ui",        "opc": 0x000002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "l16ui",       "opc": 0x001002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "l32i",        "opc": 0x002002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp32, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
@@ -352,7 +352,7 @@ class XtensaProcessor(processor_t):
         { "name": "addmi",       "opc": 0x00d002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_addmi, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
 
         { "name": "call0",       "opc": 0x000005, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL | CF_USE1 },
-        
+
         { "name": "j",           "opc": 0x000006, "mask": 0x00003f, "fmt": Instr.fmt_CALL, "feature": CF_STOP | CF_USE1 },
         { "name": "beqz",        "opc": 0x000016, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": CF_USE1 | CF_USE2 },
         { "name": "beqi",        "opc": 0x000026, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
@@ -364,7 +364,7 @@ class XtensaProcessor(processor_t):
         { "name": "bgez",        "opc": 0x0000d6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": CF_USE1 | CF_USE2 },
         { "name": "bgei",        "opc": 0x0000e6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "bgeui",       "opc": 0x0000f6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_immu, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
-        
+
         { "name": "bnone",       "opc": 0x000007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "beq",         "opc": 0x001007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "blt",         "opc": 0x002007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
@@ -379,32 +379,32 @@ class XtensaProcessor(processor_t):
         { "name": "bnall",       "opc": 0x00c007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "bbs",         "opc": 0x00d007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "bbsi",        "opc": 0x00e007, "mask": 0x00e00f, "fmt": Instr.fmt_RRI8_bb, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
-        
+
         # Exception Option
         { "name": "rfe",         "opc": 0x003000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": CF_STOP },
-        
+
         # Region Translation / MMU Option
         { "name": "wdtlb",       "opc": 0x50e000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": CF_USE1 | CF_USE2 },
         { "name": "witlb",       "opc": 0x506000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": CF_USE1 | CF_USE2 },
-        
+
         # Interrupt Option
         { "name": "rfi",         "opc": 0x003010, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_1imm, "feature": CF_STOP | CF_USE1 },
         { "name": "rsil",        "opc": 0x006000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_immr, "feature": CF_USE1 | CF_USE2 },
         { "name": "waiti",       "opc": 0x007000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_1imm, "feature": CF_USE1 },
-    
+
         # 16-bit Integer Multiply Option
         { "name": "mul16s",      "opc": 0xd10000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "mul16u",      "opc": 0xc10000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
-        
+
         # 32-bit Integer Multiply Option
         { "name": "mull",        "opc": 0x820000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "muluh",       "opc": 0xa20000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
-        
+
         # Miscellaneous Operations Option
         { "name": "nsa",         "opc": 0x40e000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
         { "name": "nsau",        "opc": 0x40f000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
         { "name": "sext",        "opc": 0x230000, "mask": 0xff000f, "fmt": Instr.fmt_RRR_sext, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
-        
+
         # Windowed Register Option
         { "name": "callx4",      "opc": 0x0000d0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP | CF_USE1 },
         { "name": "callx8",      "opc": 0x0000e0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP | CF_USE1 },
@@ -442,21 +442,28 @@ class XtensaProcessor(processor_t):
             if instr["name"] == mnem:
                 return i
         return None
-        
+
     def _instr_from_id(self, i):
         return XtensaProcessor.instruc[i]
 
     def _tighten(self):
         """Undoes some of relaxation done by `as`"""
         instr = self._instr_from_id(self.cmd.itype)
-        
+
         if instr["name"] == "l32r":
             # Transform l32r into movi
             self.cmd.itype = self._mnem_to_id("movi")
-            addr = self.cmd[1].addr
+            op = self.cmd[1]
+            addr = op.addr
             ua_dodata2(0, addr, dt_dword)
-            self.cmd[1].type = o_imm
-            self.cmd[1].value = get_long(addr)
+            value = get_long(addr)
+            op.type = o_imm
+            op.value = value
+            # Determine if this is a pointer or a number
+            # TODO: IDA is stubborn and doesn't want to set the optype manually
+            seg = getseg(value)
+            if seg:
+                set_offset(self.cmd.ea, 1, 0)
 
     def _trace_sp(self):
         """Trace SP flow"""
@@ -487,13 +494,13 @@ class XtensaProcessor(processor_t):
             self.cmd.size =  2
         else:
             self.cmd.size =  3
-        
+
         # Fetch the opcode
         opcode = get_full_byte(self.cmd.ea + 0)
         opcode |= get_full_byte(self.cmd.ea + 1) << 8
         if self.cmd.size == 3:
             opcode |= get_full_byte(self.cmd.ea + 2) << 16
-            
+
         # Find the corresponding insn
         for i in xrange(XtensaProcessor.instruc_end):
             instr = self._instr_from_id(i)
@@ -503,14 +510,14 @@ class XtensaProcessor(processor_t):
         else:
             # Not found; fail the decoding.
             return 0
-            
+
         # Parse the operands
         operands = [self.cmd[i] for i in range(6)]
         for o in operands:
             o.type = o_void
         for op, fmt in zip(operands, instr["fmt"]):
             fmt.parse(op, opcode, self.cmd)
-        
+
         # Undo some relaxation done by `as`
         # Ref: http://web.mit.edu/rhel-doc/3/rhel-as-en-3/xtensa-relaxation.html
         if self._tighten_enabled:
@@ -520,10 +527,12 @@ class XtensaProcessor(processor_t):
         return self.cmd.size
 
     def _emu_op(self, op):
+        """Analyse an individual operand of an instruction"""
         idef = self._instr_from_id(self.cmd.itype)
         if op.type == o_mem:
             ua_dodata2(0, op.addr, op.dtyp)
             ua_add_dref(0, op.addr, dr_R)
+
         elif op.type == o_near:
             features = self.cmd.get_canon_feature()
             if features & CF_CALL:
@@ -531,12 +540,15 @@ class XtensaProcessor(processor_t):
             else:
                 fl = fl_JN
             ua_add_cref(0, op.addr, fl)
+
         elif op.type == o_displ:
             if may_create_stkvars():
                 # Currently, all these operands refer to the stack
                 if op.reg == 1:
                     self._make_stkvar(op)
+
         elif op.type == o_imm:
+            # Might be a variable on the stack?
             if may_create_stkvars():
                 # addi aX, a1, imm
                 if idef["name"] == "addi" and self.cmd[0].reg != 1 and self.cmd[1].reg == 1:
@@ -544,14 +556,14 @@ class XtensaProcessor(processor_t):
 
     def emu(self):
         """
-        Emulate instruction, create cross-references, 
-        plan to analyze subsequent instructions, modify flags etc. 
-        Upon entrance to this function all information about 
+        Emulate instruction, create cross-references,
+        plan to analyze subsequent instructions, modify flags etc.
+        Upon entrance to this function all information about
         the instruction is in 'cmd' structure.
 
         If zero is returned, the kernel will delete the instruction.
         """
-                
+
         feature = self.cmd.get_canon_feature()
         # Handle operands
         if feature & CF_USE1:
@@ -583,16 +595,15 @@ class XtensaProcessor(processor_t):
         """Generate text representation of an instructon operand"""
 
         if op.type == o_reg:
-            if op.reg & 0x100:
-                # Handling for special registers
-                sfrId = op.reg & 0xFF
-                try:
-                    out_register(self._srIdToName[sfrId])
-                except KeyError:
-                    OutLong(sfrId, 10)
-            else:
-                out_register(self.regNames[op.reg])
-            
+            out_register(self.regNames[op.reg])
+                
+        elif op.type == o_sreg:
+            sfrId = op.reg & 0xFF
+            try:
+                out_register(self._srIdToName[sfrId])
+            except KeyError:
+                OutLong(sfrId, 10)
+
         elif op.type == o_imm:
             instr = self._instr_from_id(self.cmd.itype)
             if instr["name"] in ("extui", "bbci", "bbsi", "slli", "srli", "srai", "ssai"):
@@ -603,7 +614,7 @@ class XtensaProcessor(processor_t):
                 OutValue(op, OOFW_IMM|OOF_SIGNED)
             else:
                 OutValue(op, OOFW_IMM)
-                
+
         elif op.type in (o_near, o_mem):
             ok = out_name_expr(op, op.addr, BADADDR)
             if not ok:
@@ -611,19 +622,19 @@ class XtensaProcessor(processor_t):
                 OutLong(op.addr, 16)
                 out_tagoff(COLOR_ERROR)
                 QueueMark(Q_noName, self.cmd.ea)
-                
+
         elif op.type == o_displ:
             out_register(self.regNames[op.reg])
             OutLine(", ")
             OutValue(op, OOF_ADDR)
-            
+
         else:
             return False
         return True
 
     def out(self):
         """Generate text representation of an instruction in the `cmd` structure"""
-        
+
         buf = init_output_buffer(1024)
         instr = self._instr_from_id(self.cmd.itype)
 
