@@ -47,6 +47,7 @@ class Operand:
     RELAL   = 4
     RELU    = 5
     MEM_INDEX = 6
+    SREG    = 7
 
     def __init__(self, type, size, rshift, size2 = 0, rshift2 = 0, signext = False, vshift = 0, off = 0, xlate = None, dt = dt_byte, regbase = None):
         self.type = type
@@ -100,6 +101,9 @@ class Operand:
         elif self.type == Operand.RELU:
             op.type = o_near
             op.addr = val + cmd.ea + 4
+        elif self.type == Operand.SREG:
+            op.type = o_reg
+            op.reg = val | 0x100
         else:
             raise ValueError("unhandled operand type");
 
@@ -156,8 +160,8 @@ class Instr(object):
     fmt_CALL        = (Operand(Operand.RELA, 18, 6),)
     fmt_CALL_sh     = (Operand(Operand.RELAL, 18, 6),)
     fmt_CALLX       = (Operand(Operand.REG, 4, 8),)
-    fmt_RSR         = (Operand(Operand.IMM, 8, 8), Operand(Operand.REG, 4, 4))
-    fmt_RSR_spec    = (Operand(Operand.REG, 4, 4),)
+    #fmt_RSR         = (Operand(Operand.IMM, 8, 8), Operand(Operand.REG, 4, 4))
+    fmt_RSR         = (Operand(Operand.REG, 4, 4), Operand(Operand.SREG, 8, 8))
     
     fmt_NONEN       = ()
     fmt_RRRN        = (Operand(Operand.REG, 4, 12), Operand(Operand.REG, 4, 8), Operand(Operand.REG, 4, 4))
@@ -219,6 +223,7 @@ class XtensaProcessor(processor_t):
     }
     
     regNames = [
+        # Core registers
         "a0",
         "a1",
         "a2",
@@ -235,8 +240,8 @@ class XtensaProcessor(processor_t):
         "a13",
         "a14",
         "a15",
+        # Special registers
         "pc",
-        "sar",
         # Fake registers
         "CS",
         "DS",
@@ -244,141 +249,181 @@ class XtensaProcessor(processor_t):
     
     regFirstSreg = regCodeSreg = len(regNames) - 2
     regLastSreg = regDataSreg = len(regNames) - 1
+    
+    _srIdToName = {
+        3:   "sar", 
+        5:   "litbase", # Extended L32R Option
+        177: "epc1", # Exception Option
+        178: "epc2", # High-Priority Interrupt Option
+        179: "epc3", # High-Priority Interrupt Option
+        180: "epc4", # High-Priority Interrupt Option
+        181: "epc5", # High-Priority Interrupt Option
+        182: "epc6", # High-Priority Interrupt Option
+        183: "epc7", # High-Priority Interrupt Option
+        192: "depc", # Exception Option
+        194: "eps2", # High-Priority Interrupt Option
+        195: "eps3", # High-Priority Interrupt Option
+        196: "eps4", # High-Priority Interrupt Option
+        197: "eps5", # High-Priority Interrupt Option
+        198: "eps6", # High-Priority Interrupt Option
+        199: "eps7", # High-Priority Interrupt Option
+        209: "excsave1", # Exception Option
+        210: "excsave2", # High-Priority Interrupt Option
+        211: "excsave3", # High-Priority Interrupt Option
+        212: "excsave4", # High-Priority Interrupt Option
+        213: "excsave5", # High-Priority Interrupt Option
+        214: "excsave6", # High-Priority Interrupt Option
+        215: "excsave7", # High-Priority Interrupt Option
+        226: "intset", # Interrupt Option
+        227: "intclear", # Interrupt Option
+        228: "intenable", # Interrupt Option
+        230: "ps",
+        231: "vecbase", # Relocatable Vector Option
+        232: "exccause", # Exception Option
+        235: "prid", # Processor ID Option
+        238: "excvaddr", # Exception Option
+    }
 
     # Instruction definintions
     instruc = [
 #       { "name": "ill",         "opc": 0x000000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
         
         # Core Instruction Set
-        { "name": "and",         "opc": 0x100000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "or",          "opc": 0x200000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "xor",         "opc": 0x300000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "add",         "opc": 0x800000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "and",         "opc": 0x100000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "or",          "opc": 0x200000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "xor",         "opc": 0x300000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "add",         "opc": 0x800000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "addx2",       "opc": 0x900000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
         { "name": "addx2",       "opc": 0x900000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "addx4",       "opc": 0xa00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "addx4",       "opc": 0xa00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         { "name": "addx8",       "opc": 0xb00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
         { "name": "addx8",       "opc": 0xb00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "sub",         "opc": 0xc00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "subx2",       "opc": 0xd00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "subx4",       "opc": 0xe00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "subx8",       "opc": 0xf00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "slli",        "opc": 0x010000, "mask": 0xef000f, "fmt": Instr.fmt_RRR_slli, "feature": 0 },
-        { "name": "srai",        "opc": 0x210000, "mask": 0xef000f, "fmt": Instr.fmt_RRR_srai, "feature": 0 },
-        { "name": "srli",        "opc": 0x410000, "mask": 0xff000f, "fmt": Instr.fmt_RRR_sh, "feature": 0 },
-        { "name": "xsr",         "opc": 0x610000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": 0 },
-        { "name": "src",         "opc": 0x810000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "srl",         "opc": 0x910000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": 0 },
-        { "name": "sll",         "opc": 0xa10000, "mask": 0xff00ff, "fmt": Instr.fmt_RRR_sll, "feature": 0 },
-        { "name": "sra",         "opc": 0xb10000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": 0 },
-        { "name": "rsr",         "opc": 0x030000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": 0 },
-        { "name": "wsr",         "opc": 0x130000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": 0 },
-        { "name": "moveqz",      "opc": 0x830000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "movnez",      "opc": 0x930000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "movltz",      "opc": 0xa30000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "movgez",      "opc": 0xb30000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "sub",         "opc": 0xc00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "subx2",       "opc": 0xd00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "subx4",       "opc": 0xe00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "subx8",       "opc": 0xf00000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "slli",        "opc": 0x010000, "mask": 0xef000f, "fmt": Instr.fmt_RRR_slli, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "srai",        "opc": 0x210000, "mask": 0xef000f, "fmt": Instr.fmt_RRR_srai, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "srli",        "opc": 0x410000, "mask": 0xff000f, "fmt": Instr.fmt_RRR_sh, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "xsr",         "opc": 0x610000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "src",         "opc": 0x810000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "srl",         "opc": 0x910000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "sll",         "opc": 0xa10000, "mask": 0xff00ff, "fmt": Instr.fmt_RRR_sll, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "sra",         "opc": 0xb10000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "rsr",         "opc": 0x030000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "wsr",         "opc": 0x130000, "mask": 0xff000f, "fmt": Instr.fmt_RSR, "feature": CF_USE1 | CF_USE2 },
+        { "name": "moveqz",      "opc": 0x830000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "movnez",      "opc": 0x930000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "movltz",      "opc": 0xa30000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "movgez",      "opc": 0xb30000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         
-        { "name": "jx",          "opc": 0x0000a0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_STOP | CF_JUMP },
-        { "name": "callx0",      "opc": 0x0000c0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP },
+        { "name": "jx",          "opc": 0x0000a0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_STOP | CF_JUMP | CF_USE1 },
+        { "name": "callx0",      "opc": 0x0000c0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP | CF_USE1 },
         
-        { "name": "ssr",         "opc": 0x400000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": 0 },
-        { "name": "ssl",         "opc": 0x401000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": 0 },
-        { "name": "ssa8l",       "opc": 0x402000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": 0 },
-        { "name": "ssa8b",       "opc": 0x403000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": 0 },
-        { "name": "ssai",        "opc": 0x404000, "mask": 0xfff0ef, "fmt": Instr.fmt_RRR_ssai, "feature": 0 },
-        { "name": "neg",         "opc": 0x600000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": 0 },
-        { "name": "abs",         "opc": 0x600100, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": 0 },
-        { "name": "break",       "opc": 0x004000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2imm, "feature": 0 },
-        { "name": "extui",       "opc": 0x040000, "mask": 0x0e000f, "fmt": Instr.fmt_RRR_extui, "feature": 0 },
-        { "name": "extw",        "opc": 0x0020d0, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "ssr",         "opc": 0x400000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": CF_USE1 },
+        { "name": "ssl",         "opc": 0x401000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": CF_USE1 },
+        { "name": "ssa8l",       "opc": 0x402000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": CF_USE1 },
+        { "name": "ssa8b",       "opc": 0x403000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_ssa, "feature": CF_USE1 },
+        { "name": "ssai",        "opc": 0x404000, "mask": 0xfff0ef, "fmt": Instr.fmt_RRR_ssai, "feature": CF_USE1 },
+        { "name": "neg",         "opc": 0x600000, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "abs",         "opc": 0x600100, "mask": 0xff0f0f, "fmt": Instr.fmt_RRR_2rr, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "extui",       "opc": 0x040000, "mask": 0x0e000f, "fmt": Instr.fmt_RRR_extui, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 | CF_USE4 },
         { "name": "isync",       "opc": 0x002000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
         { "name": "rsync",       "opc": 0x002010, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
         { "name": "esync",       "opc": 0x002020, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
         { "name": "dsync",       "opc": 0x002030, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
         { "name": "memw",        "opc": 0x0020c0, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "extw",        "opc": 0x0020d0, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
         { "name": "nop",         "opc": 0x0020f0, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": 0 },
+        { "name": "break",       "opc": 0x004000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2imm, "feature": 0 },
         { "name": "ret",         "opc": 0x000080, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": CF_STOP },
-        { "name": "rfe",         "opc": 0x003000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": CF_STOP },
-        { "name": "rfi",         "opc": 0x003010, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_1imm, "feature": CF_STOP },
-        { "name": "rsil",        "opc": 0x006000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_immr, "feature": 0 },
-        { "name": "wdtlb",       "opc": 0x50e000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": 0 },
-        { "name": "witlb",       "opc": 0x506000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": 0 },
-        { "name": "waiti",       "opc": 0x007000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_1imm, "feature": 0 },
         
-        { "name": "l32r",        "opc": 0x000001, "mask": 0x00000f, "fmt": Instr.fmt_RI16, "feature": 0 },
+        { "name": "l32r",        "opc": 0x000001, "mask": 0x00000f, "fmt": Instr.fmt_RI16, "feature": CF_USE1 | CF_USE2 },
         
-        { "name": "l8ui",        "opc": 0x000002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp, "feature": 0 },
-        { "name": "l16ui",       "opc": 0x001002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": 0 },
-        { "name": "l32i",        "opc": 0x002002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp32, "feature": 0 },
-        { "name": "s8i",         "opc": 0x004002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp, "feature": 0 },
-        { "name": "s16i",        "opc": 0x005002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": 0 },
-        { "name": "s32i",        "opc": 0x006002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp32, "feature": 0 },
-        { "name": "l16si",       "opc": 0x009002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": 0 },
-        { "name": "movi",        "opc": 0x00a002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_i12, "feature": 0 },
-        { "name": "addi",        "opc": 0x00c002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8, "feature": 0 },
-        { "name": "addmi",       "opc": 0x00d002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_addmi, "feature": 0 },
+        { "name": "l8ui",        "opc": 0x000002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "l16ui",       "opc": 0x001002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "l32i",        "opc": 0x002002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp32, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "s8i",         "opc": 0x004002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "s16i",        "opc": 0x005002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "s32i",        "opc": 0x006002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp32, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "l16si",       "opc": 0x009002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_disp16, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "movi",        "opc": 0x00a002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_i12, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "addi",        "opc": 0x00c002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "addmi",       "opc": 0x00d002, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_addmi, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
 
-        { "name": "call0",       "opc": 0x000005, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL },
+        { "name": "call0",       "opc": 0x000005, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL | CF_USE1 },
         
-        { "name": "j",           "opc": 0x000006, "mask": 0x00003f, "fmt": Instr.fmt_CALL, "feature": CF_STOP },
-        { "name": "beqz",        "opc": 0x000016, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": 0 },
-        { "name": "beqi",        "opc": 0x000026, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": 0 },
-        { "name": "bnez",        "opc": 0x000056, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": 0 },
-        { "name": "bnei",        "opc": 0x000066, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": 0 },
-        { "name": "bltz",        "opc": 0x000096, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": 0 },
-        { "name": "blti",        "opc": 0x0000a6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": 0 },
-        { "name": "bltui",       "opc": 0x0000b6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_immu, "feature": 0 },
-        { "name": "bgez",        "opc": 0x0000d6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": 0 },
-        { "name": "bgei",        "opc": 0x0000e6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": 0 },
-        { "name": "bgeui",       "opc": 0x0000f6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_immu, "feature": 0 },
+        { "name": "j",           "opc": 0x000006, "mask": 0x00003f, "fmt": Instr.fmt_CALL, "feature": CF_STOP | CF_USE1 },
+        { "name": "beqz",        "opc": 0x000016, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": CF_USE1 | CF_USE2 },
+        { "name": "beqi",        "opc": 0x000026, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bnez",        "opc": 0x000056, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": CF_USE1 | CF_USE2 },
+        { "name": "bnei",        "opc": 0x000066, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bltz",        "opc": 0x000096, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": CF_USE1 | CF_USE2 },
+        { "name": "blti",        "opc": 0x0000a6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bltui",       "opc": 0x0000b6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_immu, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bgez",        "opc": 0x0000d6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI12, "feature": CF_USE1 | CF_USE2 },
+        { "name": "bgei",        "opc": 0x0000e6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_imm, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bgeui",       "opc": 0x0000f6, "mask": 0x0000ff, "fmt": Instr.fmt_BRI8_immu, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
         
-        { "name": "bnone",       "opc": 0x000007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "beq",         "opc": 0x001007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "blt",         "opc": 0x002007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bltu",        "opc": 0x003007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "ball",        "opc": 0x004007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bbc",         "opc": 0x005007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bbci",        "opc": 0x006007, "mask": 0x00e00f, "fmt": Instr.fmt_RRI8_bb, "feature": 0 },
-        { "name": "bany",        "opc": 0x008007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bne",         "opc": 0x009007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bge",         "opc": 0x00a007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bgeu",        "opc": 0x00b007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bnall",       "opc": 0x00c007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bbs",         "opc": 0x00d007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": 0 },
-        { "name": "bbsi",        "opc": 0x00e007, "mask": 0x00e00f, "fmt": Instr.fmt_RRI8_bb, "feature": 0 },
+        { "name": "bnone",       "opc": 0x000007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "beq",         "opc": 0x001007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "blt",         "opc": 0x002007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bltu",        "opc": 0x003007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "ball",        "opc": 0x004007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bbc",         "opc": 0x005007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bbci",        "opc": 0x006007, "mask": 0x00e00f, "fmt": Instr.fmt_RRI8_bb, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bany",        "opc": 0x008007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bne",         "opc": 0x009007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bge",         "opc": 0x00a007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bgeu",        "opc": 0x00b007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bnall",       "opc": 0x00c007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bbs",         "opc": 0x00d007, "mask": 0x00f00f, "fmt": Instr.fmt_RRI8_b, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "bbsi",        "opc": 0x00e007, "mask": 0x00e00f, "fmt": Instr.fmt_RRI8_bb, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        
+        # Exception Option
+        { "name": "rfe",         "opc": 0x003000, "mask": 0xffffff, "fmt": Instr.fmt_NONE, "feature": CF_STOP },
+        
+        # Region Translation / MMU Option
+        { "name": "wdtlb",       "opc": 0x50e000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": CF_USE1 | CF_USE2 },
+        { "name": "witlb",       "opc": 0x506000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": CF_USE1 | CF_USE2 },
+        
+        # Interrupt Option
+        { "name": "rfi",         "opc": 0x003010, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_1imm, "feature": CF_STOP | CF_USE1 },
+        { "name": "rsil",        "opc": 0x006000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_immr, "feature": CF_USE1 | CF_USE2 },
+        { "name": "waiti",       "opc": 0x007000, "mask": 0xfff0ff, "fmt": Instr.fmt_RRR_1imm, "feature": CF_USE1 },
     
         # 16-bit Integer Multiply Option
-        { "name": "mul16s",      "opc": 0xd10000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "mul16u",      "opc": 0xc10000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "mul16s",      "opc": 0xd10000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "mul16u",      "opc": 0xc10000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         
         # 32-bit Integer Multiply Option
-        { "name": "mull",        "opc": 0x820000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
-        { "name": "muluh",       "opc": 0xa20000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": 0 },
+        { "name": "mull",        "opc": 0x820000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "muluh",       "opc": 0xa20000, "mask": 0xff000f, "fmt": Instr.fmt_RRR, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         
         # Miscellaneous Operations Option
-        { "name": "nsa",         "opc": 0x40e000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": 0 },
-        { "name": "nsau",        "opc": 0x40f000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": 0 },
-        { "name": "sext",        "opc": 0x230000, "mask": 0xff000f, "fmt": Instr.fmt_RRR_sext, "feature": 0 },
+        { "name": "nsa",         "opc": 0x40e000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "nsau",        "opc": 0x40f000, "mask": 0xfff00f, "fmt": Instr.fmt_RRR_2r, "feature": CF_CHG1 | CF_USE1 | CF_USE2 },
+        { "name": "sext",        "opc": 0x230000, "mask": 0xff000f, "fmt": Instr.fmt_RRR_sext, "feature": CF_CHG1 | CF_USE1 | CF_USE2 | CF_USE3 },
         
         # Windowed Register Option
-        { "name": "callx4",      "opc": 0x0000d0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP },
-        { "name": "callx8",      "opc": 0x0000e0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP },
-        { "name": "callx12",     "opc": 0x0000f0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP },
-        { "name": "call4",       "opc": 0x000015, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL },
-        { "name": "call8",       "opc": 0x000025, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL },
-        { "name": "call12",      "opc": 0x000035, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL },
-        { "name": "entry",       "opc": 0x000036, "mask": 0x0000ff, "fmt": Instr.fmt_RI12S3, "feature": 0 },
+        { "name": "callx4",      "opc": 0x0000d0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP | CF_USE1 },
+        { "name": "callx8",      "opc": 0x0000e0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP | CF_USE1 },
+        { "name": "callx12",     "opc": 0x0000f0, "mask": 0xfff0ff, "fmt": Instr.fmt_CALLX, "feature": CF_CALL | CF_JUMP | CF_USE1 },
+        { "name": "call4",       "opc": 0x000015, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL | CF_USE1 },
+        { "name": "call8",       "opc": 0x000025, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL | CF_USE1 },
+        { "name": "call12",      "opc": 0x000035, "mask": 0x00003f, "fmt": Instr.fmt_CALL_sh, "feature": CF_CALL | CF_USE1 },
+        { "name": "entry",       "opc": 0x000036, "mask": 0x0000ff, "fmt": Instr.fmt_RI12S3, "feature": CF_USE1 | CF_USE2 },
         { "name": "retw.n",      "opc": 0x00f01d, "mask": 0xffffff, "fmt": Instr.fmt_NONEN, "feature": CF_STOP },
 
         # Code Density Option
-        { "name": "l32i.n",      "opc": 0x000008, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_disp, "feature": 0 },
-        { "name": "s32i.n",      "opc": 0x000009, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_disp, "feature": 0 },
-        { "name": "add.n",       "opc": 0x00000a, "mask": 0xff000f, "fmt": Instr.fmt_RRRN, "feature": 0 },
-        { "name": "addi.n",      "opc": 0x00000b, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_addi, "feature": 0 },
-        { "name": "movi.n",      "opc": 0x00000c, "mask": 0xff008f, "fmt": Instr.fmt_RI7, "feature": 0 },
-        { "name": "beqz.n",      "opc": 0x00008c, "mask": 0xff00cf, "fmt": Instr.fmt_RI6, "feature": 0 },
-        { "name": "bnez.n",      "opc": 0x0000cc, "mask": 0xff00cf, "fmt": Instr.fmt_RI6, "feature": 0 },
-        { "name": "mov.n",       "opc": 0x00000d, "mask": 0xfff00f, "fmt": Instr.fmt_RRRN_2r, "feature": 0 },
+        { "name": "l32i.n",      "opc": 0x000008, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_disp, "feature": CF_USE1 | CF_USE2 },
+        { "name": "s32i.n",      "opc": 0x000009, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_disp, "feature": CF_USE1 | CF_USE2 },
+        { "name": "add.n",       "opc": 0x00000a, "mask": 0xff000f, "fmt": Instr.fmt_RRRN, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "addi.n",      "opc": 0x00000b, "mask": 0xff000f, "fmt": Instr.fmt_RRRN_addi, "feature": CF_USE1 | CF_USE2 | CF_USE3 },
+        { "name": "movi.n",      "opc": 0x00000c, "mask": 0xff008f, "fmt": Instr.fmt_RI7, "feature": CF_USE1 | CF_USE2 },
+        { "name": "beqz.n",      "opc": 0x00008c, "mask": 0xff00cf, "fmt": Instr.fmt_RI6, "feature": CF_USE1 | CF_USE2 },
+        { "name": "bnez.n",      "opc": 0x0000cc, "mask": 0xff00cf, "fmt": Instr.fmt_RI6, "feature": CF_USE1 | CF_USE2 },
+        { "name": "mov.n",       "opc": 0x00000d, "mask": 0xfff00f, "fmt": Instr.fmt_RRRN_2r, "feature": CF_USE1 | CF_USE2 },
         { "name": "ret.n",       "opc": 0x00f00d, "mask": 0xffffff, "fmt": Instr.fmt_NONEN, "feature": CF_STOP },
         { "name": "break.n",     "opc": 0x00f02d, "mask": 0xfff0ff, "fmt": Instr.fmt_RRRN, "feature": 0 },
         { "name": "nop.n",       "opc": 0x00f03d, "mask": 0xffffff, "fmt": Instr.fmt_NONEN, "feature": 0 },
@@ -390,13 +435,6 @@ class XtensaProcessor(processor_t):
         processor_t.__init__(self)
         # Analysis options:
         self._tighten_enabled = True
-
-    def _decode_cmd_length(self):
-        """Determine whether this is a 24-bit or 16-bit instruction"""
-        if get_full_byte(self.cmd.ea) & 0x08:
-            return 2
-        else:
-            return 3
 
     def _mnem_to_id(self, mnem):
         for i in xrange(XtensaProcessor.instruc_end):
@@ -429,6 +467,15 @@ class XtensaProcessor(processor_t):
         if instr["name"] in ("addi", "addmi") and self.cmd[0].reg == 1 and self.cmd[1].reg == 1:
             offset = ida_signed(self.cmd[2].value)
             add_auto_stkpnt2(func, self.cmd.ea + self.cmd.size, offset)
+        # TODO: movi/sub + movi/add.n
+
+    def _make_stkvar(self, op):
+        """Turn the operand into a stack variable reference"""
+        func = get_func(self.cmd.ea)
+        if not func:
+            return
+        if ua_stkvar2(op, op.addr, STKVAR_VALID_SIZE):
+            op_stkvar(self.cmd.ea, op.n)
 
     # IDA callbacks
 
@@ -436,7 +483,10 @@ class XtensaProcessor(processor_t):
         """Analyse and decode the current instruction into `cmd`"""
 
         # Determine how long the opcode is
-        self.cmd.size = self._decode_cmd_length()
+        if get_full_byte(self.cmd.ea) & 0x08:
+            self.cmd.size =  2
+        else:
+            self.cmd.size =  3
         
         # Fetch the opcode
         opcode = get_full_byte(self.cmd.ea + 0)
@@ -469,6 +519,29 @@ class XtensaProcessor(processor_t):
         # Done
         return self.cmd.size
 
+    def _emu_op(self, op):
+        idef = self._instr_from_id(self.cmd.itype)
+        if op.type == o_mem:
+            ua_dodata2(0, op.addr, op.dtyp)
+            ua_add_dref(0, op.addr, dr_R)
+        elif op.type == o_near:
+            features = self.cmd.get_canon_feature()
+            if features & CF_CALL:
+                fl = fl_CN
+            else:
+                fl = fl_JN
+            ua_add_cref(0, op.addr, fl)
+        elif op.type == o_displ:
+            if may_create_stkvars():
+                # Currently, all these operands refer to the stack
+                if op.reg == 1:
+                    self._make_stkvar(op)
+        elif op.type == o_imm:
+            if may_create_stkvars():
+                # addi aX, a1, imm
+                if idef["name"] == "addi" and self.cmd[0].reg != 1 and self.cmd[1].reg == 1:
+                    self._make_stkvar(op)
+
     def emu(self):
         """
         Emulate instruction, create cross-references, 
@@ -478,31 +551,19 @@ class XtensaProcessor(processor_t):
 
         If zero is returned, the kernel will delete the instruction.
         """
-        instr = self._instr_from_id(self.cmd.itype)
                 
+        feature = self.cmd.get_canon_feature()
         # Handle operands
-        for i in range(6):
-            op = self.cmd[i]
-            if op.type == o_void:
-                break
-            elif op.type == o_mem:
-                ua_dodata2(0, op.addr, op.dtyp)
-                ua_add_dref(0, op.addr, dr_R)
-            elif op.type == o_near:
-                features = self.cmd.get_canon_feature()
-                if features & CF_CALL:
-                    fl = fl_CN
-                else:
-                    fl = fl_JN
-                ua_add_cref(0, op.addr, fl)
-            elif op.type == o_displ:
-                if may_create_stkvars() and op.reg == 1:
-                    func = get_func(self.cmd.ea)
-                    if func and ua_stkvar2(op, op.addr, STKVAR_VALID_SIZE):
-                        op_stkvar(self.cmd.ea, op.n)
+        if feature & CF_USE1:
+            self._emu_op(self.cmd[0])
+        if feature & CF_USE2:
+            self._emu_op(self.cmd[1])
+        if feature & CF_USE3:
+            self._emu_op(self.cmd[2])
+        if feature & CF_USE4:
+            self._emu_op(self.cmd[3])
 
         # Handle features
-        feature = self.cmd.get_canon_feature()
         if feature & CF_JUMP:
             QueueMark(Q_jumps, self.cmd.ea)
         flow = not ((feature & CF_STOP) or (False))
@@ -522,7 +583,15 @@ class XtensaProcessor(processor_t):
         """Generate text representation of an instructon operand"""
 
         if op.type == o_reg:
-            out_register(self.regNames[op.reg])
+            if op.reg & 0x100:
+                # Handling for special registers
+                sfrId = op.reg & 0xFF
+                try:
+                    out_register(self._srIdToName[sfrId])
+                except KeyError:
+                    OutLong(sfrId, 10)
+            else:
+                out_register(self.regNames[op.reg])
             
         elif op.type == o_imm:
             instr = self._instr_from_id(self.cmd.itype)
@@ -559,7 +628,7 @@ class XtensaProcessor(processor_t):
         instr = self._instr_from_id(self.cmd.itype)
 
         # Output the instruction's mnemonic
-        OutMnem(15)
+        OutMnem()
         # Output each operand
         for i in range(6):
             if self.cmd[i].type == o_void:
